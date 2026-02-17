@@ -8,6 +8,7 @@ import pandas as pd
 from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, List, Optional, Tuple
+from src.utils.financial_standards import RFS_CODE_PATTERNS, RFS_CODE_TO_STANDARD
 
 class FileParser:
     """Parse multiple file formats and extract structured data."""
@@ -488,6 +489,7 @@ class FileParser:
                 line_item = "Unlabeled Line Item"
             period_match = period_pattern.search(line)
             rfs_code = self._classify_rfs_code(line_item)
+            ifrs_standard = self._infer_ifrs_standard(rfs_code, line)
             statement_lines.append(
                 {
                     "line_item": line_item,
@@ -496,12 +498,27 @@ class FileParser:
                     "source": source,
                     "confidence": round(confidence, 3),
                     "rfs_code": rfs_code,
+                    "ifrs_standard": ifrs_standard,
                 }
             )
             if len(statement_lines) >= 40:
                 break
 
         recognized_codes = sorted({line["rfs_code"] for line in statement_lines if line.get("rfs_code") != "OTHER"})
+        recognized_ifrs_standards = sorted(
+            {
+                line.get("ifrs_standard", "")
+                for line in statement_lines
+                if line.get("ifrs_standard")
+            }
+        )
+        comparative_periods = sorted(
+            {
+                line.get("period", "").strip()
+                for line in statement_lines
+                if line.get("period", "").strip()
+            }
+        )
         statement_type = self._infer_statement_type(recognized_codes)
         checks = {
             "minimum_text_length": len(normalized_text.strip()) >= 80,
@@ -509,6 +526,8 @@ class FileParser:
             "contains_statement_lines": len(statement_lines) > 0,
             "traceable_source": source in {"embedded_text", "plain_text", "document_text", "ocr_pdf", "ocr_image"},
             "contains_recognized_rfs_codes": len(recognized_codes) > 0,
+            "contains_ifrs_standard_tags": len(recognized_ifrs_standards) > 0,
+            "contains_comparative_periods": len(comparative_periods) >= 2,
         }
         quality_score = round((sum(checks.values()) / len(checks)) * 100, 1)
         warnings = []
@@ -518,10 +537,14 @@ class FileParser:
             warnings.append("No structured statement lines detected")
         if not checks["contains_recognized_rfs_codes"]:
             warnings.append("No recognized RFS financial categories detected")
+        if not checks["contains_ifrs_standard_tags"]:
+            warnings.append("No IFRS standard tags inferred from line items")
+        if not checks["contains_comparative_periods"]:
+            warnings.append("Comparative period view looks limited")
 
         return {
             "standard": "RFS-STATEMENT-v1",
-            "schema_version": "1.1",
+            "schema_version": "1.2",
             "status": "pass" if quality_score >= 75 else "needs_review",
             "quality_score": quality_score,
             "confidence": round(confidence, 3),
@@ -530,11 +553,13 @@ class FileParser:
             "document_profile": {
                 "statement_type": statement_type,
                 "recognized_rfs_codes": recognized_codes,
+                "recognized_ifrs_standards": recognized_ifrs_standards,
             },
             "summary": {
                 "line_items_detected": len(statement_lines),
                 "characters": len(normalized_text),
                 "source": source,
+                "comparative_periods_detected": len(comparative_periods),
             },
             "statement_lines": statement_lines,
         }
@@ -542,31 +567,38 @@ class FileParser:
     def _classify_rfs_code(self, line_item: str) -> str:
         """Map line item labels to canonical RFS-like financial codes."""
         item = (line_item or "").lower()
-        patterns = [
-            (r"revenue|sales|turnover", "REV"),
-            (r"cost of goods|cogs|cost of sales", "COGS"),
-            (r"gross profit|gross margin", "GROSS_PROFIT"),
-            (r"operating income|operating profit|ebit", "OPERATING_INCOME"),
-            (r"net income|net profit|profit after tax|earnings", "NET_INCOME"),
-            (r"expense|opex|operating expense", "EXPENSE"),
-            (r"asset", "ASSETS"),
-            (r"liabilit", "LIABILITIES"),
-            (r"equity|shareholder", "EQUITY"),
-            (r"cash flow|cashflow", "CASH_FLOW"),
-            (r"ebitda", "EBITDA"),
-            (r"tax", "TAX"),
-        ]
-        for pattern, code in patterns:
+        for pattern, code in RFS_CODE_PATTERNS:
             if re.search(pattern, item):
                 return code
         return "OTHER"
 
+    def _infer_ifrs_standard(self, rfs_code: str, line_text: str = "") -> str:
+        """Infer likely IFRS standard for an extracted line item."""
+        mapped = RFS_CODE_TO_STANDARD.get(rfs_code, "")
+        if mapped:
+            return mapped
+
+        line = (line_text or "").lower()
+        if "ifrs 15" in line:
+            return "IFRS 15"
+        if "ifrs 16" in line:
+            return "IFRS 16"
+        if "ifrs 9" in line:
+            return "IFRS 9"
+        if "ias 12" in line:
+            return "IAS 12"
+        if "ias 7" in line:
+            return "IAS 7"
+        if "ifrs 18" in line or "ias 1" in line:
+            return "IAS 1 / IFRS 18"
+        return ""
+
     def _infer_statement_type(self, recognized_codes: List[str]) -> str:
         """Infer likely statement type from recognized line item codes."""
         code_set = set(recognized_codes)
-        if code_set & {"REV", "COGS", "GROSS_PROFIT", "OPERATING_INCOME", "NET_INCOME"}:
+        if code_set & {"REV", "COGS", "GROSS_PROFIT", "OPERATING_INCOME", "NET_INCOME", "DEFERRED_REVENUE"}:
             return "income_statement"
-        if code_set & {"ASSETS", "LIABILITIES", "EQUITY"}:
+        if code_set & {"ASSETS", "LIABILITIES", "EQUITY", "ROU_ASSET", "LEASE_LIABILITY", "FINANCIAL_INSTRUMENT"}:
             return "balance_sheet"
         if code_set & {"CASH_FLOW"}:
             return "cash_flow_statement"

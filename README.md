@@ -11,6 +11,8 @@ An autonomous, multi-agent system that transforms raw financial data into profes
 ✅ **Advanced Customization**: Branding, colors, fonts, layouts
 ✅ **Professional PDF Output**: ReportLab-powered with full control
 ✅ **Interactive Web UI**: Streamlit-based with tabs and controls
+✅ **IFRS/GAAP-Aware Compliance Layer**: Standards mapping, jurisdiction overlays, and compliance checks
+✅ **Standards Knowledge Integration**: Uses `Financial Statement Standards.docx` and finance references in AI prompts
 ✅ **Automated Testing**: pytest suite with validation pipeline
 ✅ **Self-Healing**: Error detection and auto-correction
 ✅ **Local Deployment**: Run entirely on your machine

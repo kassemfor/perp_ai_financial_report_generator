@@ -27,92 +27,29 @@ from src.backend.file_parser import FileParser
 from src.config import LLMBackend
 from src.core.llm_interface import llm
 from src.core.state import MEMORY
+from src.utils.financial_standards import (
+    IFRS_STANDARDS_MAP,
+    RFS_CODE_LABELS as STANDARD_RFS_CODE_LABELS,
+    STANDARD_FINANCE_FORMULAS,
+    VALIDATION_CHECKLIST,
+    flatten_kpi_library,
+    jurisdiction_label,
+    jurisdiction_notes,
+    jurisdiction_options,
+    standards_context_text,
+)
 
 UPLOAD_FORMATS = ["csv", "txt", "pdf", "docx", "xlsx", "png", "jpg", "jpeg", "tiff", "bmp", "webp"]
 BACKEND_OPTIONS = [LLMBackend.OLLAMA.value, LLMBackend.OPENAI.value, LLMBackend.GEMINI.value, LLMBackend.LM_STUDIO.value, LLMBackend.ANTHROPIC.value]
 REFERENCE_FINANCE_FILES = [
     Path("accounting analyzing.pdf"),
+    Path("Financial Statement Standards.docx"),
     Path("FFMDubai2011.xlsx"),
     Path("ffmslides/TVOM_I.ppt"),
     Path("ffmslides/TVOM_II.pptx"),
 ]
-RFS_CODE_LABELS = {
-    "REV": "Revenue",
-    "COGS": "Cost of Goods Sold",
-    "GROSS_PROFIT": "Gross Profit",
-    "OPERATING_INCOME": "Operating Income",
-    "NET_INCOME": "Net Income",
-    "EXPENSE": "Expenses",
-    "ASSETS": "Assets",
-    "LIABILITIES": "Liabilities",
-    "EQUITY": "Equity",
-    "CASH_FLOW": "Cash Flow",
-    "EBITDA": "EBITDA",
-    "TAX": "Tax",
-    "OTHER": "Other",
-}
-BASE_FINANCE_FORMULAS: List[Dict[str, str]] = [
-    {
-        "formula": "Present Value (PV)",
-        "expression": "PV = FV / (1 + r)^n",
-        "meaning": "Current worth of a future cash flow discounted at required return r.",
-        "need": "Used for valuation, investment appraisal, and discounting future obligations.",
-    },
-    {
-        "formula": "Future Value (FV)",
-        "expression": "FV = PV * (1 + r)^n",
-        "meaning": "Value of current money after compounding at rate r over n periods.",
-        "need": "Used for savings growth, scenario forecasting, and capital planning.",
-    },
-    {
-        "formula": "NPV",
-        "expression": "NPV = Sum(CF_t / (1 + r)^t) - Initial Investment",
-        "meaning": "Net value created after discounting expected project cash flows.",
-        "need": "Primary decision metric for accept/reject capital projects.",
-    },
-    {
-        "formula": "IRR",
-        "expression": "Find r such that NPV = 0",
-        "meaning": "Discount rate where project net present value equals zero.",
-        "need": "Used to compare project returns with hurdle rate / WACC.",
-    },
-    {
-        "formula": "Annuity PV",
-        "expression": "PV = PMT * (1 - (1 + r)^(-n)) / r",
-        "meaning": "Present value of equal periodic cash flows.",
-        "need": "Used for loan valuation, lease analysis, and payout planning.",
-    },
-    {
-        "formula": "Perpetuity PV",
-        "expression": "PV = C / r",
-        "meaning": "Present value of an infinite constant cash-flow stream.",
-        "need": "Used for terminal value and long-run stable cash flow assumptions.",
-    },
-    {
-        "formula": "WACC",
-        "expression": "WACC = (E/V)*Re + (D/V)*Rd*(1 - Tax)",
-        "meaning": "Blended cost of financing from equity and debt after tax shield.",
-        "need": "Used as discount rate baseline for DCF and project valuation.",
-    },
-    {
-        "formula": "ROE",
-        "expression": "ROE = Net Income / Equity",
-        "meaning": "Return generated on shareholders' equity capital.",
-        "need": "Used to assess shareholder value creation and capital efficiency.",
-    },
-    {
-        "formula": "ROA",
-        "expression": "ROA = Net Income / Assets",
-        "meaning": "Profitability relative to total asset base.",
-        "need": "Used to evaluate asset utilization effectiveness.",
-    },
-    {
-        "formula": "Debt-to-Equity",
-        "expression": "D/E = Liabilities / Equity",
-        "meaning": "Financial leverage relative to owners' capital.",
-        "need": "Used for solvency risk and capital structure decisions.",
-    },
-]
+RFS_CODE_LABELS = dict(STANDARD_RFS_CODE_LABELS)
+BASE_FINANCE_FORMULAS: List[Dict[str, str]] = [dict(item) for item in STANDARD_FINANCE_FORMULAS]
 DEFAULT_MODEL_BY_BACKEND = {
     LLMBackend.OLLAMA.value: "mistral:latest",
     LLMBackend.OPENAI.value: "gpt-4o-mini",
@@ -253,7 +190,7 @@ TEMPLATE_KEYWORDS = {
 }
 
 st.set_page_config(
-    page_title="RFS Reader Studio",
+    page_title="Financial Statement Intelligence Studio",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -483,6 +420,7 @@ def _statement_rows(parsed_docs: List[Dict[str, Any]], include_sample: bool = Tr
                     "source": line.get("source", ""),
                     "confidence": float(line.get("confidence", 0.0)),
                     "rfs_code": line.get("rfs_code", "OTHER"),
+                    "ifrs_standard": line.get("ifrs_standard", ""),
                 }
             )
 
@@ -500,6 +438,7 @@ def _statement_rows(parsed_docs: List[Dict[str, Any]], include_sample: bool = Tr
                 "source",
                 "confidence",
                 "rfs_code",
+                "ifrs_standard",
                 "doc_index",
             ]
         )
@@ -516,39 +455,43 @@ def _statement_rows(parsed_docs: List[Dict[str, Any]], include_sample: bool = Tr
                 "source": "sample",
                 "confidence": 0.75,
                 "rfs_code": "REV",
+                "ifrs_standard": "IFRS 15",
             },
             {
                 "doc_index": 0,
                 "file_name": "sample",
-                "line_item": "Consumer Satisfaction",
-                "value": "87",
-                "amount_numeric": 87,
+                "line_item": "Cost of Goods Sold",
+                "value": "18",
+                "amount_numeric": 18,
                 "period": "2024",
                 "source": "sample",
                 "confidence": 0.75,
-                "rfs_code": "OTHER",
+                "rfs_code": "COGS",
+                "ifrs_standard": "IAS 1 / IFRS 18",
             },
             {
                 "doc_index": 0,
                 "file_name": "sample",
-                "line_item": "Revenue Increase",
-                "value": "24",
-                "amount_numeric": 24,
+                "line_item": "Operating Income",
+                "value": "10",
+                "amount_numeric": 10,
                 "period": "2024",
                 "source": "sample",
                 "confidence": 0.75,
-                "rfs_code": "REV",
+                "rfs_code": "OPERATING_INCOME",
+                "ifrs_standard": "IAS 1 / IFRS 18",
             },
             {
                 "doc_index": 0,
                 "file_name": "sample",
-                "line_item": "Conversion Rate",
-                "value": "4.2",
-                "amount_numeric": 4.2,
+                "line_item": "Net Income",
+                "value": "7",
+                "amount_numeric": 7,
                 "period": "2024",
                 "source": "sample",
                 "confidence": 0.75,
-                "rfs_code": "OTHER",
+                "rfs_code": "NET_INCOME",
+                "ifrs_standard": "IAS 1 / IFRS 18",
             },
         ]
     )
@@ -720,6 +663,34 @@ def _extract_pdf_text(path: Path, max_chars: int = 15000) -> str:
             text = (page.extract_text() or "").strip()
             if text:
                 chunks.append(text)
+            if len("\n".join(chunks)) >= max_chars:
+                break
+        return "\n".join(chunks)[:max_chars]
+    except Exception:
+        return ""
+
+
+def _extract_docx_text(path: Path, max_chars: int = 15000) -> str:
+    try:
+        from docx import Document
+    except Exception:
+        return ""
+    try:
+        document = Document(str(path))
+        chunks: List[str] = []
+        for paragraph in document.paragraphs:
+            text = (paragraph.text or "").strip()
+            if text:
+                chunks.append(text)
+            if len("\n".join(chunks)) >= max_chars:
+                break
+        for table in document.tables:
+            for row in table.rows:
+                row_text = " | ".join((cell.text or "").strip() for cell in row.cells if (cell.text or "").strip())
+                if row_text:
+                    chunks.append(row_text)
+                if len("\n".join(chunks)) >= max_chars:
+                    break
             if len("\n".join(chunks)) >= max_chars:
                 break
         return "\n".join(chunks)[:max_chars]
@@ -930,6 +901,114 @@ def _compute_financial_kpis(statement_df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+def _build_ifrs_compliance_snapshot(
+    doc: Dict[str, Any],
+    statement_df: pd.DataFrame,
+    jurisdiction_profile: str,
+) -> Dict[str, Any]:
+    """Heuristic IFRS compliance scoring using extracted statement lines."""
+    if statement_df.empty:
+        return {
+            "status": "needs_review",
+            "score": 0.0,
+            "checks": [],
+            "missing_primary_statements": [],
+            "recognized_ifrs_standards": [],
+            "jurisdiction_notes": jurisdiction_notes(jurisdiction_profile),
+        }
+
+    code_set = {str(code).strip() for code in statement_df.get("rfs_code", pd.Series(dtype=str)).fillna("") if str(code).strip()}
+    line_items = [str(item).lower() for item in statement_df.get("line_item", pd.Series(dtype=str)).fillna("")]
+    line_text = " ".join(line_items)
+    periods = sorted({str(period).strip() for period in statement_df.get("period", pd.Series(dtype=str)).fillna("") if str(period).strip()})
+
+    primary_statement_checks = {
+        "Statement of financial position": bool(code_set & {"ASSETS", "LIABILITIES", "EQUITY", "ROU_ASSET", "LEASE_LIABILITY"}),
+        "Statement of profit or loss and OCI": bool(
+            code_set & {"REV", "COGS", "GROSS_PROFIT", "OPERATING_INCOME", "NET_INCOME", "EXPENSE", "OCI"}
+        ),
+        "Statement of cash flows": bool(code_set & {"CASH_FLOW"}),
+        "Statement of changes in equity": bool(code_set & {"EQUITY"}),
+        "Notes / disclosures proxy": bool(
+            code_set & {"DEFERRED_REVENUE", "FINANCIAL_INSTRUMENT", "ECL_PROVISION", "CURRENT_TAX", "DEFERRED_TAX"}
+        ),
+    }
+
+    recognized_ifrs = set(
+        str(value).strip()
+        for value in statement_df.get("ifrs_standard", pd.Series(dtype=str)).fillna("")
+        if str(value).strip()
+    )
+    recognized_ifrs.update(doc.get("rfs_statement", {}).get("document_profile", {}).get("recognized_ifrs_standards", []))
+
+    revenue_present = bool(code_set & {"REV"})
+    has_contract_terms = any(term in line_text for term in ["contract", "performance obligation", "deferred revenue", "unearned"])
+    lease_terms_present = any(term in line_text for term in ["lease", "right-of-use", "rou"])
+    financial_instrument_terms = any(term in line_text for term in ["financial instrument", "fvoci", "fvtpl", "amortized cost", "ecl"])
+
+    checks: List[Dict[str, Any]] = [
+        {
+            "Check": "Primary statement structure",
+            "Standard": "IAS 1 / IFRS 18",
+            "Status": "pass" if all(primary_statement_checks.values()) else "needs_review",
+            "Detail": "Ensure all five primary statements are represented.",
+        },
+        {
+            "Check": "Comparative periods",
+            "Standard": "IAS 1 / IFRS 18",
+            "Status": "pass" if len(periods) >= 2 else "needs_review",
+            "Detail": "At least one comparative period is expected.",
+        },
+        {
+            "Check": "Revenue recognition context",
+            "Standard": "IFRS 15",
+            "Status": "pass"
+            if (not revenue_present) or (("DEFERRED_REVENUE" in code_set) or not has_contract_terms)
+            else "needs_review",
+            "Detail": "Revenue and deferred revenue should align where contract terms are present.",
+        },
+        {
+            "Check": "Lease recognition",
+            "Standard": "IFRS 16",
+            "Status": "pass"
+            if (not lease_terms_present) or bool(code_set & {"ROU_ASSET", "LEASE_LIABILITY"})
+            else "needs_review",
+            "Detail": "Lease language should map to right-of-use assets and lease liabilities.",
+        },
+        {
+            "Check": "Financial instruments and ECL",
+            "Standard": "IFRS 9",
+            "Status": "pass"
+            if (not financial_instrument_terms) or bool(code_set & {"FINANCIAL_INSTRUMENT", "ECL_PROVISION"})
+            else "needs_review",
+            "Detail": "Financial instruments and expected credit loss provisions should be visible.",
+        },
+        {
+            "Check": "Tax split visibility",
+            "Standard": "IAS 12",
+            "Status": "pass"
+            if ("TAX" not in code_set) or bool(code_set & {"CURRENT_TAX", "DEFERRED_TAX"})
+            else "needs_review",
+            "Detail": "Current and deferred tax lines should be separated when tax is material.",
+        },
+    ]
+
+    pass_ratio = _safe_div(sum(1 for check in checks if check["Status"] == "pass"), len(checks))
+    score = round(pass_ratio * 100, 1)
+    missing_primary = [name for name, ok in primary_statement_checks.items() if not ok]
+
+    return {
+        "status": "pass" if score >= 75 else "needs_review",
+        "score": score,
+        "checks": checks,
+        "primary_statement_checks": primary_statement_checks,
+        "missing_primary_statements": missing_primary,
+        "recognized_ifrs_standards": sorted(recognized_ifrs),
+        "jurisdiction_notes": jurisdiction_notes(jurisdiction_profile),
+        "periods_detected": periods,
+    }
+
+
 def _fallback_finance_recommendation(file_name: str, kpi_pack: Dict[str, Any]) -> str:
     primary = kpi_pack.get("primary", {})
     ratios = kpi_pack.get("ratios", {})
@@ -1076,6 +1155,18 @@ def _load_finance_reference_material() -> Dict[str, Any]:
             )
             if highlights:
                 combined_context_parts.append(f"{path.name}: " + " | ".join(highlights[:6]))
+        elif suffix == ".docx":
+            text = _extract_docx_text(path)
+            highlights = [line.strip() for line in text.splitlines() if line.strip()][:12]
+            references.append(
+                {
+                    "file_name": path.name,
+                    "status": "loaded" if highlights else "limited",
+                    "highlights": highlights or ["No text extracted from DOCX reference."],
+                }
+            )
+            if highlights:
+                combined_context_parts.append(f"{path.name}: " + " | ".join(highlights[:8]))
         elif suffix == ".pptx":
             text = _extract_pptx_text(path)
             highlights = [line.strip() for line in text.splitlines() if line.strip()][:8]
@@ -1101,8 +1192,12 @@ def _load_finance_reference_material() -> Dict[str, Any]:
             if highlights:
                 combined_context_parts.append(f"{path.name}: " + " | ".join(highlights[:5]))
 
-    context_text = "\n".join(combined_context_parts)[:18000]
+    standards_context = standards_context_text(max_chars=9000)
+    if standards_context:
+        combined_context_parts.append(standards_context)
+    context_text = "\n".join(combined_context_parts)[:22000]
     formula_knowledge = _build_formula_knowledge(context_text, excel_formula_cells)
+    industry_kpi_rows = flatten_kpi_library(max_per_industry=6)
 
     return {
         "references": references,
@@ -1110,6 +1205,10 @@ def _load_finance_reference_material() -> Dict[str, Any]:
         "formula_knowledge": formula_knowledge,
         "formula_context_text": _formula_knowledge_text(formula_knowledge, max_items=24),
         "excel_formula_cells": excel_formula_cells[:24],
+        "ifrs_standards_map": IFRS_STANDARDS_MAP,
+        "validation_checklist": VALIDATION_CHECKLIST,
+        "industry_kpi_rows": industry_kpi_rows,
+        "standards_context_text": standards_context,
     }
 
 
@@ -1120,23 +1219,43 @@ def _generate_ai_finance_brief(
     reference_context: str,
     formula_context: str,
     template_choice: str,
+    jurisdiction_profile: str,
     llm_runtime_settings: Dict[str, Any],
+    compliance_snapshot: Optional[Dict[str, Any]] = None,
 ) -> str:
-    line_sample = statement_df[["line_item", "value", "period", "rfs_code"]].head(16).to_dict("records")
+    line_sample = statement_df.reindex(
+        columns=["line_item", "value", "period", "rfs_code", "ifrs_standard"],
+        fill_value="",
+    ).head(16).to_dict("records")
+    compliance_summary = {
+        "status": (compliance_snapshot or {}).get("status", "needs_review"),
+        "score": (compliance_snapshot or {}).get("score", 0.0),
+        "recognized_ifrs_standards": (compliance_snapshot or {}).get("recognized_ifrs_standards", []),
+        "missing_primary_statements": (compliance_snapshot or {}).get("missing_primary_statements", []),
+    }
+    compliance_rows = (compliance_snapshot or {}).get("checks", [])
+    jurisdiction_name = jurisdiction_label(jurisdiction_profile)
     prompt = (
         f"Prepare a report-ready financial analysis for {file_name}.\n"
         f"Template context: {template_choice} ({_template_ai_hint(template_choice)}).\n"
+        f"Jurisdiction profile: {jurisdiction_name} ({jurisdiction_profile}).\n"
         "Use concise professional language and include:\n"
         "1) Executive assessment\n"
         "2) Detailed ratio interpretation\n"
-        "3) Risks and opportunities\n"
-        "4) Actionable recommendations (short, prioritized)\n\n"
+        "3) IFRS/local GAAP compliance perspective\n"
+        "4) Risks and opportunities\n"
+        "5) Actionable recommendations (short, prioritized)\n\n"
         f"Primary KPIs: {json.dumps(kpi_pack.get('primary', {}), default=str)}\n"
         f"Ratios: {json.dumps(kpi_pack.get('ratios', {}), default=str)}\n"
         f"Sample statement lines: {json.dumps(line_sample, default=str)}\n"
+        f"Compliance summary: {json.dumps(compliance_summary, default=str)}\n"
+        f"Compliance checks: {json.dumps(compliance_rows[:8], default=str)}\n"
         f"Reference materials summary: {reference_context[:5000]}\n\n"
         "Formula knowledge (meaning + why needed):\n"
         f"{formula_context[:4500]}\n\n"
+        "Jurisdiction notes:\n"
+        + "\n".join(f"- {note}" for note in jurisdiction_notes(jurisdiction_profile)[:5])
+        + "\n\n"
         "When presenting analysis, explicitly explain formula meaning and business need before recommendations.\n"
         "Return markdown only."
     )
@@ -2040,7 +2159,7 @@ def _render_preview_panel(reader_title: str, parsed_docs: List[Dict[str, Any]]) 
         f"""
 <div class="preview-card">
   <div class="preview-title">{reader_title}</div>
-  <div class="preview-subtitle">Industry Growth Trends & Consumer Insights</div>
+  <div class="preview-subtitle">IFRS-aware statement and performance insights</div>
 </div>
 """,
         unsafe_allow_html=True,
@@ -2065,7 +2184,7 @@ def _render_preview_panel(reader_title: str, parsed_docs: List[Dict[str, Any]]) 
             top_rows,
             x="line_item",
             y="amount_numeric",
-            title="Consumer Preference Trends",
+            title="Top Extracted Financial Line Items",
             color_discrete_sequence=["#4E8DA3"],
         )
         bar_chart.update_layout(
@@ -2087,7 +2206,7 @@ def _render_preview_panel(reader_title: str, parsed_docs: List[Dict[str, Any]]) 
             trend_df,
             x="period",
             y="amount_numeric",
-            title="Annual Industry Growth",
+            title="Period Financial Trend",
             color_discrete_sequence=["#7EB7CB"],
         )
         line_chart.update_layout(
@@ -2111,7 +2230,7 @@ def _render_preview_panel(reader_title: str, parsed_docs: List[Dict[str, Any]]) 
             x="amount_numeric",
             y="line_item",
             orientation="h",
-            title="Market Share by Company",
+            title="Line Item Contribution",
             color_discrete_sequence=["#D75D47"],
         )
         share_chart.update_layout(
@@ -2148,7 +2267,7 @@ def _render_preview_panel(reader_title: str, parsed_docs: List[Dict[str, Any]]) 
             ]
         )
         donut_chart.update_layout(
-            title="Consumer Behavior Insights",
+            title="Uploaded Source Mix",
             height=300,
             paper_bgcolor="rgba(0,0,0,0)",
             margin=dict(l=10, r=10, t=50, b=20),
@@ -2173,6 +2292,7 @@ def _render_rfs_table(parsed_docs: List[Dict[str, Any]]) -> None:
                 "Extraction Confidence": f"{float(doc.get('extraction_confidence', 0.0)) * 100:.1f}%",
                 "RFS Status": rfs.get("status", "unknown"),
                 "RFS Quality": f"{float(rfs.get('quality_score', 0.0)):.1f}%",
+                "IFRS Tags": ", ".join(rfs.get("document_profile", {}).get("recognized_ifrs_standards", [])[:5]),
                 "Line Items": int(rfs.get("summary", {}).get("line_items_detected", 0)),
                 "Warnings": "; ".join(rfs.get("warnings", [])),
             }
@@ -2186,10 +2306,11 @@ def _render_statement_reports_tab(
     parsed_docs: List[Dict[str, Any]],
     template_choice: str,
     llm_runtime_settings: Dict[str, Any],
+    jurisdiction_profile: str,
 ) -> None:
     st.markdown("### Statement-by-Statement Financial Analysis")
     st.caption(
-        "Each uploaded statement has its own tab with detailed calculations, KPI interpretation, and AI recommendations."
+        "Each uploaded statement has its own tab with KPI interpretation, IFRS/GAAP checks, and AI recommendations."
     )
     if not parsed_docs:
         st.info("Upload one or more statements and click `Sign Up & Generate` to create per-statement reports.")
@@ -2224,10 +2345,11 @@ def _render_statement_reports_tab(
                 continue
 
             kpi_pack = _compute_financial_kpis(doc_rows)
+            compliance_snapshot = _build_ifrs_compliance_snapshot(doc, doc_rows, jurisdiction_profile=jurisdiction_profile)
             primary = kpi_pack.get("primary", {})
             ratios = kpi_pack.get("ratios", {})
 
-            kpi_col_1, kpi_col_2, kpi_col_3, kpi_col_4 = st.columns(4)
+            kpi_col_1, kpi_col_2, kpi_col_3, kpi_col_4, kpi_col_5 = st.columns(5)
             with kpi_col_1:
                 st.metric("Revenue", _format_amount(float(primary.get("revenue", 0.0))))
             with kpi_col_2:
@@ -2236,6 +2358,24 @@ def _render_statement_reports_tab(
                 st.metric("Net Margin", _format_percent(float(ratios.get("net_margin", 0.0))))
             with kpi_col_4:
                 st.metric("Debt/Equity", f"{float(ratios.get('debt_to_equity', 0.0)):.2f}x")
+            with kpi_col_5:
+                st.metric("IFRS Check", f"{float(compliance_snapshot.get('score', 0.0)):.1f}%")
+
+            if compliance_snapshot.get("recognized_ifrs_standards"):
+                st.caption(
+                    "Detected standards: "
+                    + ", ".join(compliance_snapshot.get("recognized_ifrs_standards", [])[:8])
+                )
+
+            st.markdown("##### Compliance Snapshot")
+            compliance_df = pd.DataFrame(compliance_snapshot.get("checks", []))
+            if not compliance_df.empty:
+                st.dataframe(compliance_df, use_container_width=True, hide_index=True)
+            missing_primary = compliance_snapshot.get("missing_primary_statements", [])
+            if missing_primary:
+                st.warning("Missing primary statement signals: " + ", ".join(missing_primary))
+            for note in compliance_snapshot.get("jurisdiction_notes", []):
+                st.caption(f"- {note}")
 
             st.markdown("##### Detailed Calculations")
             calc_df = pd.DataFrame(kpi_pack.get("calculation_rows", []))
@@ -2271,7 +2411,7 @@ def _render_statement_reports_tab(
 
             st.markdown("##### Extracted Statement Lines")
             line_view = doc_rows.reindex(
-                columns=["line_item", "value", "period", "rfs_code", "source", "confidence"],
+                columns=["line_item", "value", "period", "rfs_code", "ifrs_standard", "source", "confidence"],
                 fill_value="",
             ).copy()
             line_view["rfs_code"] = line_view["rfs_code"].map(lambda code: f"{code} ({RFS_CODE_LABELS.get(code, 'Other')})")
@@ -2291,7 +2431,9 @@ def _render_statement_reports_tab(
                     reference_context=reference_context,
                     formula_context=formula_context_text,
                     template_choice=template_choice,
+                    jurisdiction_profile=jurisdiction_profile,
                     llm_runtime_settings=llm_runtime_settings,
+                    compliance_snapshot=compliance_snapshot,
                 )
                 st.session_state[ai_key] = ai_report
 
@@ -2304,10 +2446,11 @@ def _render_finance_reference_tab(
     parsed_docs: List[Dict[str, Any]],
     template_choice: str,
     llm_runtime_settings: Dict[str, Any],
+    jurisdiction_profile: str,
 ) -> None:
-    st.markdown("### Company Financial Perspective (Reference Framework)")
+    st.markdown("### IFRS and Performance Knowledge Hub")
     st.caption(
-        "Uses FFMDubai2011.xlsx and ffmslides TVOM references to frame valuation and finance recommendations."
+        "Uses Financial Statement Standards.docx plus model workbooks/slides to drive standards-aware analysis."
     )
 
     reference_bundle = _load_finance_reference_material()
@@ -2315,6 +2458,13 @@ def _render_finance_reference_tab(
     reference_context = reference_bundle.get("context_text", "")
     formula_knowledge = reference_bundle.get("formula_knowledge", [])
     formula_context_text = reference_bundle.get("formula_context_text", "")
+    ifrs_standards_map = reference_bundle.get("ifrs_standards_map", [])
+    validation_checklist = reference_bundle.get("validation_checklist", [])
+    industry_kpi_rows = reference_bundle.get("industry_kpi_rows", [])
+
+    st.caption(f"Jurisdiction profile: {jurisdiction_label(jurisdiction_profile)}")
+    for note in jurisdiction_notes(jurisdiction_profile):
+        st.caption(f"- {note}")
 
     if references:
         ref_rows = []
@@ -2335,6 +2485,15 @@ def _render_finance_reference_tab(
             use_container_width=True,
             hide_index=True,
         )
+    if ifrs_standards_map:
+        st.markdown("#### IFRS Standards Mapping")
+        st.dataframe(pd.DataFrame(ifrs_standards_map), use_container_width=True, hide_index=True)
+    if validation_checklist:
+        st.markdown("#### Validation Checklist")
+        st.dataframe(pd.DataFrame(validation_checklist), use_container_width=True, hide_index=True)
+    if industry_kpi_rows:
+        st.markdown("#### Industry KPI Libraries")
+        st.dataframe(pd.DataFrame(industry_kpi_rows), use_container_width=True, hide_index=True)
 
     statement_df = _statement_rows(parsed_docs, include_sample=False)
     if statement_df.empty:
@@ -2342,10 +2501,15 @@ def _render_finance_reference_tab(
         return
 
     overall_kpi = _compute_financial_kpis(statement_df)
+    compliance_snapshot = _build_ifrs_compliance_snapshot(
+        doc={"rfs_statement": {"document_profile": {}}},
+        statement_df=statement_df,
+        jurisdiction_profile=jurisdiction_profile,
+    )
     primary = overall_kpi.get("primary", {})
     ratios = overall_kpi.get("ratios", {})
 
-    metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
+    metric_col_1, metric_col_2, metric_col_3, metric_col_4, metric_col_5 = st.columns(5)
     with metric_col_1:
         st.metric("Total Revenue", _format_amount(float(primary.get("revenue", 0.0))))
     with metric_col_2:
@@ -2354,9 +2518,21 @@ def _render_finance_reference_tab(
         st.metric("Operating Margin", _format_percent(float(ratios.get("operating_margin", 0.0))))
     with metric_col_4:
         st.metric("Liabilities/Assets", _format_percent(float(ratios.get("liabilities_to_assets", 0.0))))
+    with metric_col_5:
+        st.metric("IFRS Check", f"{float(compliance_snapshot.get('score', 0.0)):.1f}%")
 
     st.markdown("#### Company-Level Calculation Sheet")
     st.dataframe(pd.DataFrame(overall_kpi.get("calculation_rows", [])), use_container_width=True, hide_index=True)
+    st.markdown("#### Company Compliance Snapshot")
+    company_compliance_df = pd.DataFrame(compliance_snapshot.get("checks", []))
+    if not company_compliance_df.empty:
+        st.dataframe(company_compliance_df, use_container_width=True, hide_index=True)
+    if compliance_snapshot.get("recognized_ifrs_standards"):
+        st.caption(
+            "Detected standards: " + ", ".join(compliance_snapshot.get("recognized_ifrs_standards", [])[:8])
+        )
+    if compliance_snapshot.get("missing_primary_statements"):
+        st.warning("Missing primary statement signals: " + ", ".join(compliance_snapshot.get("missing_primary_statements", [])))
 
     code_totals = overall_kpi.get("code_totals", {})
     code_df = pd.DataFrame(
@@ -2416,7 +2592,9 @@ def _render_finance_reference_tab(
             reference_context=reference_context,
             formula_context=formula_context_text,
             template_choice=template_choice,
+            jurisdiction_profile=jurisdiction_profile,
             llm_runtime_settings=llm_runtime_settings,
+            compliance_snapshot=compliance_snapshot,
         )
         st.session_state[company_ai_key] = company_report
 
@@ -2431,12 +2609,13 @@ def _initialize_state() -> None:
         st.session_state.reader_sections = _sections_from_outline(st.session_state.reader_outline, parsed_docs=[])
     st.session_state.setdefault("reader_selected_section", 0)
     st.session_state.setdefault("reader_docs", [])
-    st.session_state.setdefault("reader_title", "Marketing Analysis Overview")
-    st.session_state.setdefault("reader_subtitle", "Industry Growth Trends & Consumer Insights")
+    st.session_state.setdefault("reader_title", "Financial Statement Intelligence")
+    st.session_state.setdefault("reader_subtitle", "IFRS-aware compliance and KPI insights")
     st.session_state.setdefault("template_choice", "Report")
     st.session_state.setdefault("manual_text", "")
     st.session_state.setdefault("topic_text", "")
     st.session_state.setdefault("include_local_accounting_sample", False)
+    st.session_state.setdefault("jurisdiction_profile", "IFRS_GLOBAL")
     st.session_state.setdefault("route_summary_backend", LLMBackend.OLLAMA.value)
     st.session_state.setdefault("route_summary_model", DEFAULT_MODEL_BY_BACKEND[LLMBackend.OLLAMA.value])
     st.session_state.setdefault("route_insight_backend", LLMBackend.OLLAMA.value)
@@ -2551,6 +2730,13 @@ with st.sidebar:
     include_summary = st.checkbox("Include summary", value=True)
     include_charts = st.checkbox("Include charts", value=True)
     include_kpis = st.checkbox("Include KPI cards", value=True)
+    st.selectbox(
+        "Jurisdiction profile",
+        options=jurisdiction_options(),
+        format_func=jurisdiction_label,
+        key="jurisdiction_profile",
+        help="Select the IFRS/GAAP overlay used by compliance checks and AI recommendations.",
+    )
 
     preview_manual_routing = _build_manual_routing_payload(
         route_summary_backend=route_summary_backend,
@@ -2594,8 +2780,8 @@ with st.sidebar:
 st.markdown(
     """
 <div class="header-bar">
-  <div class="header-title">Marketing Analysis Overview</div>
-  <div class="header-subtitle">RFS-ready reader workspace with OCR-aware extraction for PDF and image statements.</div>
+  <div class="header-title">Financial Statement Intelligence Studio</div>
+  <div class="header-subtitle">OCR-aware extraction, IFRS/GAAP checks, and KPI-driven recommendations.</div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -2616,8 +2802,8 @@ with nav_col_3:
         use_container_width=False,
     )
 
-st.markdown('<div class="hero-title">AI-Powered Visual Generator</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-note">Choose your template format and generate statement-ready content in seconds.</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-title">AI Financial Reporting Workspace</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-note">Use financial statement standards knowledge to generate compliance-aware analysis.</div>', unsafe_allow_html=True)
 
 if "pending_template_choice" in st.session_state:
     pending_template = st.session_state.pop("pending_template_choice")
@@ -2735,7 +2921,7 @@ if reset_reader:
     st.session_state.reader_outline = _template_base_outline(st.session_state.template_choice)
     st.session_state.reader_sections = _sections_from_outline(st.session_state.reader_outline, parsed_docs=[])
     st.session_state.reader_selected_section = 0
-    st.session_state.reader_title = "Marketing Analysis Overview"
+    st.session_state.reader_title = "Financial Statement Intelligence"
     st.session_state.reader_subtitle = _template_subtitle(st.session_state.template_choice)
     for key in list(st.session_state.keys()):
         if key.startswith("statement_ai_brief_") or key == "company_finance_recommendation":
@@ -2767,9 +2953,17 @@ if run_reader:
         st.error("Provide a topic, text, or upload at least one file before generating.")
     else:
         reference_bundle = _load_finance_reference_material()
+        selected_jurisdiction = st.session_state.get("jurisdiction_profile", "IFRS_GLOBAL")
         finance_knowledge_context = (
-            (reference_bundle.get("context_text", "") + "\n\n" + reference_bundle.get("formula_context_text", ""))
-        )[:12000]
+            (
+                reference_bundle.get("context_text", "")
+                + "\n\n"
+                + reference_bundle.get("formula_context_text", "")
+                + "\n\n"
+                + f"Jurisdiction profile: {jurisdiction_label(selected_jurisdiction)} ({selected_jurisdiction})\n"
+                + "\n".join(jurisdiction_notes(selected_jurisdiction))
+            )
+        )[:16000]
         for key in list(st.session_state.keys()):
             if key.startswith("statement_ai_brief_") or key == "company_finance_recommendation":
                 st.session_state.pop(key, None)
@@ -2842,6 +3036,10 @@ if run_reader:
                         "llm_model": llm_model,
                         "finance_knowledge_context": finance_knowledge_context,
                         "formula_knowledge": reference_bundle.get("formula_knowledge", []),
+                        "ifrs_standards_map": reference_bundle.get("ifrs_standards_map", []),
+                        "validation_checklist": reference_bundle.get("validation_checklist", []),
+                        "industry_kpi_rows": reference_bundle.get("industry_kpi_rows", []),
+                        "jurisdiction_profile": selected_jurisdiction,
                         "llm_settings": {
                             "backend": llm_backend,
                             "model_name": llm_model,
@@ -2907,6 +3105,7 @@ with statement_reports_tab:
         st.session_state.reader_docs,
         template_choice=st.session_state.template_choice,
         llm_runtime_settings=llm_runtime_settings,
+        jurisdiction_profile=st.session_state.jurisdiction_profile,
     )
 
 with finance_tab:
@@ -2914,6 +3113,7 @@ with finance_tab:
         st.session_state.reader_docs,
         template_choice=st.session_state.template_choice,
         llm_runtime_settings=llm_runtime_settings,
+        jurisdiction_profile=st.session_state.jurisdiction_profile,
     )
 
 with inspector_tab:
@@ -2921,7 +3121,7 @@ with inspector_tab:
     _render_rfs_table(st.session_state.reader_docs)
 
     statement_df = _statement_rows(st.session_state.reader_docs)
-    statement_view_columns = ["file_name", "line_item", "value", "period", "rfs_code", "source", "confidence"]
+    statement_view_columns = ["file_name", "line_item", "value", "period", "rfs_code", "ifrs_standard", "source", "confidence"]
     statement_df = statement_df.reindex(columns=statement_df.columns.union(statement_view_columns), fill_value="")
     st.markdown("### Extracted Statement Lines")
     st.dataframe(
@@ -2938,7 +3138,7 @@ with advanced_tab:
     st.write(
         "- PDF flow: embedded text extraction first, then OCR fallback for scanned pages.\n"
         "- Image flow: direct OCR with confidence scoring.\n"
-        "- RFS flow: normalized statement lines + quality checks + compliance status."
+        "- RFS flow: normalized statement lines + IFRS tags + quality/compliance checks."
     )
     st.write(
         "If OCR status reports `failed` due missing engine, install both:\n"
@@ -2971,4 +3171,4 @@ with advanced_tab:
     else:
         st.info("No full pipeline executions yet.")
 
-st.caption("RFS Reader Studio | Dynamic OCR + Statement Compliance")
+st.caption("Financial Statement Intelligence Studio | Dynamic OCR + IFRS/GAAP Compliance")

@@ -201,6 +201,10 @@ Insights:
         """Build compact reference context from task payload."""
         explicit = str(task.get("finance_knowledge_context", "") or "").strip()
         formula_entries = task.get("formula_knowledge", [])
+        ifrs_standards = task.get("ifrs_standards_map", [])
+        validation_checks = task.get("validation_checklist", [])
+        industry_kpis = task.get("industry_kpi_rows", [])
+        jurisdiction_profile = str(task.get("jurisdiction_profile", "") or "").strip()
 
         formula_lines: List[str] = []
         if isinstance(formula_entries, list):
@@ -212,7 +216,43 @@ Insights:
                     f"Meaning: {entry.get('meaning', '')} | Need: {entry.get('need', '')}"
                 )
 
-        merged = (explicit + "\n" + "\n".join(formula_lines)).strip()
+        standard_lines: List[str] = []
+        if isinstance(ifrs_standards, list):
+            for entry in ifrs_standards[:10]:
+                if not isinstance(entry, dict):
+                    continue
+                standard_lines.append(
+                    f"{entry.get('standard', '')}: {entry.get('purpose', '')} | Affected: {entry.get('line_items', '')}"
+                )
+
+        checklist_lines: List[str] = []
+        if isinstance(validation_checks, list):
+            for entry in validation_checks[:10]:
+                if not isinstance(entry, dict):
+                    continue
+                checklist_lines.append(f"{entry.get('check', '')}: {entry.get('detail', '')}")
+
+        kpi_lines: List[str] = []
+        if isinstance(industry_kpis, list):
+            for entry in industry_kpis[:14]:
+                if not isinstance(entry, dict):
+                    continue
+                kpi_lines.append(
+                    f"{entry.get('Industry', '')} - {entry.get('KPI', '')}: {entry.get('Formula', '')}"
+                )
+
+        merged = (
+            explicit
+            + ("\nJurisdiction profile: " + jurisdiction_profile if jurisdiction_profile else "")
+            + "\n\nFormula knowledge:\n"
+            + "\n".join(formula_lines)
+            + "\n\nIFRS standards map:\n"
+            + "\n".join(standard_lines)
+            + "\n\nValidation checklist:\n"
+            + "\n".join(checklist_lines)
+            + "\n\nIndustry KPI library samples:\n"
+            + "\n".join(kpi_lines)
+        ).strip()
         return merged[:7000]
 
     def _extract_keywords(self, content: str, insights: List[str]) -> List[str]:

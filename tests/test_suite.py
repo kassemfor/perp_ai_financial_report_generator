@@ -33,6 +33,35 @@ class TestFileParser:
         assert "xlsx" in parser.supported_formats
         assert "png" in parser.supported_formats
 
+    def test_ifrs_specific_code_classification(self):
+        from src.backend.file_parser import FileParser
+
+        parser = FileParser()
+        assert parser._classify_rfs_code("Right-of-use asset") == "ROU_ASSET"
+        assert parser._classify_rfs_code("Lease liability") == "LEASE_LIABILITY"
+        assert parser._classify_rfs_code("Deferred revenue") == "DEFERRED_REVENUE"
+        assert parser._classify_rfs_code("Expected credit loss allowance") == "ECL_PROVISION"
+
+    def test_rfs_statement_includes_ifrs_tags(self):
+        from src.backend.file_parser import FileParser
+
+        parser = FileParser()
+        text = (
+            "Revenue 2024 1200\n"
+            "Deferred revenue 2024 300\n"
+            "Lease liability 2024 180\n"
+            "Right-of-use asset 2024 170\n"
+            "Revenue 2023 1100\n"
+        )
+        statement = parser._build_rfs_statement(text=text, source="plain_text", confidence=0.92)
+
+        assert statement["schema_version"] == "1.2"
+        assert statement["summary"]["line_items_detected"] >= 4
+        assert statement["summary"]["comparative_periods_detected"] >= 2
+        standards = statement["document_profile"].get("recognized_ifrs_standards", [])
+        assert "IFRS 15" in standards
+        assert "IFRS 16" in standards
+
 class TestLLMInterface:
     """Test LLM interface."""
 
@@ -85,6 +114,18 @@ class TestSharedMemory:
         mem.append_to_list("test_list", "item1")
         mem.append_to_list("test_list", "item2")
         assert len(mem.get("test_list", [])) == 2
+
+
+class TestFinancialStandardsKnowledge:
+    """Test packaged standards knowledge."""
+
+    def test_standards_bundle_contains_ifrs_map(self):
+        from src.utils.financial_standards import standards_bundle
+
+        bundle = standards_bundle()
+        assert bundle["ifrs_standards_map"]
+        assert any("IFRS 18" in row.get("standard", "") for row in bundle["ifrs_standards_map"])
+        assert bundle["industry_kpi_rows"]
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

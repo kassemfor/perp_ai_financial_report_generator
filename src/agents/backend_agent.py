@@ -58,6 +58,9 @@ class BackendAgent(BaseAgent):
                 "rfs_status": parsed_data.get("rfs_statement", {}).get("status", "unknown"),
                 "rfs_quality_score": parsed_data.get("rfs_statement", {}).get("quality_score", 0.0),
                 "rfs_line_items": parsed_data.get("rfs_statement", {}).get("summary", {}).get("line_items_detected", 0),
+                "ifrs_standards_detected": parsed_data.get("rfs_statement", {})
+                .get("document_profile", {})
+                .get("recognized_ifrs_standards", []),
             }
 
             duration = (datetime.now() - start).total_seconds()
