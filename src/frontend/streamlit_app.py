@@ -3,11 +3,13 @@ Reader-first Streamlit interface with dynamic OCR and RFS statement extraction.
 """
 
 import json
+import html
 import re
 import sys
+import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 import pandas as pd
@@ -28,6 +30,89 @@ from src.core.state import MEMORY
 
 UPLOAD_FORMATS = ["csv", "txt", "pdf", "docx", "xlsx", "png", "jpg", "jpeg", "tiff", "bmp", "webp"]
 BACKEND_OPTIONS = [LLMBackend.OLLAMA.value, LLMBackend.OPENAI.value, LLMBackend.GEMINI.value, LLMBackend.LM_STUDIO.value, LLMBackend.ANTHROPIC.value]
+REFERENCE_FINANCE_FILES = [
+    Path("accounting analyzing.pdf"),
+    Path("FFMDubai2011.xlsx"),
+    Path("ffmslides/TVOM_I.ppt"),
+    Path("ffmslides/TVOM_II.pptx"),
+]
+RFS_CODE_LABELS = {
+    "REV": "Revenue",
+    "COGS": "Cost of Goods Sold",
+    "GROSS_PROFIT": "Gross Profit",
+    "OPERATING_INCOME": "Operating Income",
+    "NET_INCOME": "Net Income",
+    "EXPENSE": "Expenses",
+    "ASSETS": "Assets",
+    "LIABILITIES": "Liabilities",
+    "EQUITY": "Equity",
+    "CASH_FLOW": "Cash Flow",
+    "EBITDA": "EBITDA",
+    "TAX": "Tax",
+    "OTHER": "Other",
+}
+BASE_FINANCE_FORMULAS: List[Dict[str, str]] = [
+    {
+        "formula": "Present Value (PV)",
+        "expression": "PV = FV / (1 + r)^n",
+        "meaning": "Current worth of a future cash flow discounted at required return r.",
+        "need": "Used for valuation, investment appraisal, and discounting future obligations.",
+    },
+    {
+        "formula": "Future Value (FV)",
+        "expression": "FV = PV * (1 + r)^n",
+        "meaning": "Value of current money after compounding at rate r over n periods.",
+        "need": "Used for savings growth, scenario forecasting, and capital planning.",
+    },
+    {
+        "formula": "NPV",
+        "expression": "NPV = Sum(CF_t / (1 + r)^t) - Initial Investment",
+        "meaning": "Net value created after discounting expected project cash flows.",
+        "need": "Primary decision metric for accept/reject capital projects.",
+    },
+    {
+        "formula": "IRR",
+        "expression": "Find r such that NPV = 0",
+        "meaning": "Discount rate where project net present value equals zero.",
+        "need": "Used to compare project returns with hurdle rate / WACC.",
+    },
+    {
+        "formula": "Annuity PV",
+        "expression": "PV = PMT * (1 - (1 + r)^(-n)) / r",
+        "meaning": "Present value of equal periodic cash flows.",
+        "need": "Used for loan valuation, lease analysis, and payout planning.",
+    },
+    {
+        "formula": "Perpetuity PV",
+        "expression": "PV = C / r",
+        "meaning": "Present value of an infinite constant cash-flow stream.",
+        "need": "Used for terminal value and long-run stable cash flow assumptions.",
+    },
+    {
+        "formula": "WACC",
+        "expression": "WACC = (E/V)*Re + (D/V)*Rd*(1 - Tax)",
+        "meaning": "Blended cost of financing from equity and debt after tax shield.",
+        "need": "Used as discount rate baseline for DCF and project valuation.",
+    },
+    {
+        "formula": "ROE",
+        "expression": "ROE = Net Income / Equity",
+        "meaning": "Return generated on shareholders' equity capital.",
+        "need": "Used to assess shareholder value creation and capital efficiency.",
+    },
+    {
+        "formula": "ROA",
+        "expression": "ROA = Net Income / Assets",
+        "meaning": "Profitability relative to total asset base.",
+        "need": "Used to evaluate asset utilization effectiveness.",
+    },
+    {
+        "formula": "Debt-to-Equity",
+        "expression": "D/E = Liabilities / Equity",
+        "meaning": "Financial leverage relative to owners' capital.",
+        "need": "Used for solvency risk and capital structure decisions.",
+    },
+]
 DEFAULT_MODEL_BY_BACKEND = {
     LLMBackend.OLLAMA.value: "mistral:latest",
     LLMBackend.OPENAI.value: "gpt-4o-mini",
@@ -381,14 +466,15 @@ def _to_numeric_amount(value: str) -> float:
     return -abs(parsed) if negative else parsed
 
 
-def _statement_rows(parsed_docs: List[Dict[str, Any]]) -> pd.DataFrame:
+def _statement_rows(parsed_docs: List[Dict[str, Any]], include_sample: bool = True) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
-    for doc in parsed_docs:
+    for doc_index, doc in enumerate(parsed_docs):
         file_name = doc.get("file_name", "unknown")
         for line in doc.get("rfs_statement", {}).get("statement_lines", []):
             amount_numeric = _to_numeric_amount(line.get("value", "0"))
             rows.append(
                 {
+                    "doc_index": doc_index,
                     "file_name": file_name,
                     "line_item": line.get("line_item", "Unlabeled"),
                     "value": line.get("value", ""),
@@ -396,15 +482,32 @@ def _statement_rows(parsed_docs: List[Dict[str, Any]]) -> pd.DataFrame:
                     "period": line.get("period") or "Current",
                     "source": line.get("source", ""),
                     "confidence": float(line.get("confidence", 0.0)),
+                    "rfs_code": line.get("rfs_code", "OTHER"),
                 }
             )
 
     if rows:
         return pd.DataFrame(rows)
 
+    if not include_sample:
+        return pd.DataFrame(
+            columns=[
+                "file_name",
+                "line_item",
+                "value",
+                "amount_numeric",
+                "period",
+                "source",
+                "confidence",
+                "rfs_code",
+                "doc_index",
+            ]
+        )
+
     return pd.DataFrame(
         [
             {
+                "doc_index": 0,
                 "file_name": "sample",
                 "line_item": "Market Growth",
                 "value": "32",
@@ -412,8 +515,10 @@ def _statement_rows(parsed_docs: List[Dict[str, Any]]) -> pd.DataFrame:
                 "period": "2024",
                 "source": "sample",
                 "confidence": 0.75,
+                "rfs_code": "REV",
             },
             {
+                "doc_index": 0,
                 "file_name": "sample",
                 "line_item": "Consumer Satisfaction",
                 "value": "87",
@@ -421,8 +526,10 @@ def _statement_rows(parsed_docs: List[Dict[str, Any]]) -> pd.DataFrame:
                 "period": "2024",
                 "source": "sample",
                 "confidence": 0.75,
+                "rfs_code": "OTHER",
             },
             {
+                "doc_index": 0,
                 "file_name": "sample",
                 "line_item": "Revenue Increase",
                 "value": "24",
@@ -430,8 +537,10 @@ def _statement_rows(parsed_docs: List[Dict[str, Any]]) -> pd.DataFrame:
                 "period": "2024",
                 "source": "sample",
                 "confidence": 0.75,
+                "rfs_code": "REV",
             },
             {
+                "doc_index": 0,
                 "file_name": "sample",
                 "line_item": "Conversion Rate",
                 "value": "4.2",
@@ -439,6 +548,7 @@ def _statement_rows(parsed_docs: List[Dict[str, Any]]) -> pd.DataFrame:
                 "period": "2024",
                 "source": "sample",
                 "confidence": 0.75,
+                "rfs_code": "OTHER",
             },
         ]
     )
@@ -569,6 +679,481 @@ def _compute_metrics(parsed_docs: List[Dict[str, Any]]) -> Dict[str, float]:
         "line_items": line_items,
         "ocr_coverage": (ocr_docs / len(parsed_docs)) * 100.0,
     }
+
+
+def _safe_div(numerator: float, denominator: float) -> float:
+    if abs(denominator) < 1e-9:
+        return 0.0
+    return numerator / denominator
+
+
+def _period_sort_key(period: str) -> Tuple[int, str]:
+    text = str(period or "").strip()
+    year_match = re.search(r"(19|20)\d{2}", text)
+    if year_match:
+        return (int(year_match.group(0)), text)
+    quarter_match = re.search(r"Q([1-4]).*(19|20)\d{2}", text, re.IGNORECASE)
+    if quarter_match:
+        year = int(re.search(r"(19|20)\d{2}", text).group(0))
+        quarter = int(quarter_match.group(1))
+        return (year * 10 + quarter, text)
+    return (9999, text)
+
+
+def _format_amount(value: float) -> str:
+    return f"{value:,.2f}"
+
+
+def _format_percent(value: float) -> str:
+    return f"{value * 100:.2f}%"
+
+
+def _extract_pdf_text(path: Path, max_chars: int = 15000) -> str:
+    try:
+        import pypdf
+    except Exception:
+        return ""
+    try:
+        reader = pypdf.PdfReader(str(path))
+        chunks: List[str] = []
+        for page in reader.pages[:24]:
+            text = (page.extract_text() or "").strip()
+            if text:
+                chunks.append(text)
+            if len("\n".join(chunks)) >= max_chars:
+                break
+        return "\n".join(chunks)[:max_chars]
+    except Exception:
+        return ""
+
+
+def _extract_excel_formula_cells(path: Path, max_items: int = 20) -> List[str]:
+    try:
+        import openpyxl
+    except Exception:
+        return []
+    formula_cells: List[str] = []
+    try:
+        workbook = openpyxl.load_workbook(path, data_only=False, read_only=True)
+        for sheet in workbook.worksheets:
+            for row in sheet.iter_rows():
+                for cell in row:
+                    value = cell.value
+                    if isinstance(value, str) and value.startswith("="):
+                        formula_cells.append(f"{sheet.title}!{cell.coordinate}: {value}")
+                        if len(formula_cells) >= max_items:
+                            workbook.close()
+                            return formula_cells
+        workbook.close()
+    except Exception:
+        return []
+    return formula_cells
+
+
+def _build_formula_knowledge(reference_context: str, excel_formula_cells: List[str]) -> List[Dict[str, str]]:
+    context = (reference_context or "").lower()
+    knowledge: List[Dict[str, str]] = []
+    for entry in BASE_FINANCE_FORMULAS:
+        name = entry["formula"].lower()
+        expression = entry["expression"].lower()
+        key_tokens = [token for token in re.findall(r"[a-z]{3,}", name + " " + expression) if token not in {"the", "and"}]
+        matched = any(token in context for token in key_tokens)
+        source = "reference+baseline" if matched else "baseline"
+        knowledge.append(
+            {
+                "formula": entry["formula"],
+                "expression": entry["expression"],
+                "meaning": entry["meaning"],
+                "need": entry["need"],
+                "source": source,
+            }
+        )
+
+    for item in excel_formula_cells[:12]:
+        knowledge.append(
+            {
+                "formula": "Workbook Formula Sample",
+                "expression": item,
+                "meaning": "Formula used in FFMDubai2011 model workbook.",
+                "need": "Reference for agent reasoning about model structure and dependencies.",
+                "source": "FFMDubai2011.xlsx",
+            }
+        )
+    return knowledge
+
+
+def _formula_knowledge_text(formula_knowledge: List[Dict[str, str]], max_items: int = 16) -> str:
+    lines = []
+    for entry in formula_knowledge[:max_items]:
+        lines.append(
+            f"{entry.get('formula')}: {entry.get('expression')} | Meaning: {entry.get('meaning')} | Need: {entry.get('need')}"
+        )
+    return "\n".join(lines)
+
+
+def _compute_financial_kpis(statement_df: pd.DataFrame) -> Dict[str, Any]:
+    if statement_df.empty:
+        empty_codes = {code: 0.0 for code in RFS_CODE_LABELS}
+        return {
+            "line_items": 0,
+            "code_totals": empty_codes,
+            "primary": {},
+            "ratios": {},
+            "trend": pd.DataFrame(columns=["period", "metric", "amount_numeric", "order_key"]),
+            "calculation_rows": [],
+        }
+
+    df = statement_df.copy()
+    if "rfs_code" not in df.columns:
+        df["rfs_code"] = "OTHER"
+
+    code_totals = df.groupby("rfs_code", as_index=True)["amount_numeric"].sum().to_dict()
+    for code in RFS_CODE_LABELS:
+        code_totals.setdefault(code, 0.0)
+
+    revenue = float(code_totals.get("REV", 0.0))
+    cogs = float(code_totals.get("COGS", 0.0))
+    gross_profit = float(code_totals.get("GROSS_PROFIT", revenue - cogs if (revenue or cogs) else 0.0))
+    operating_income = float(code_totals.get("OPERATING_INCOME", gross_profit - float(code_totals.get("EXPENSE", 0.0))))
+    net_income = float(code_totals.get("NET_INCOME", operating_income - float(code_totals.get("TAX", 0.0))))
+    assets = float(code_totals.get("ASSETS", 0.0))
+    liabilities = float(code_totals.get("LIABILITIES", 0.0))
+    equity = float(code_totals.get("EQUITY", 0.0))
+    cash_flow = float(code_totals.get("CASH_FLOW", 0.0))
+
+    ratios = {
+        "gross_margin": _safe_div(gross_profit, revenue),
+        "operating_margin": _safe_div(operating_income, revenue),
+        "net_margin": _safe_div(net_income, revenue),
+        "debt_to_equity": _safe_div(liabilities, equity),
+        "liabilities_to_assets": _safe_div(liabilities, assets),
+        "asset_turnover": _safe_div(revenue, assets),
+        "cashflow_to_income": _safe_div(cash_flow, net_income),
+    }
+
+    trend_rows: List[Dict[str, Any]] = []
+    for metric_code, metric_name in [("REV", "Revenue"), ("NET_INCOME", "Net Income"), ("CASH_FLOW", "Cash Flow")]:
+        metric_df = (
+            df[df["rfs_code"] == metric_code]
+            .groupby("period", as_index=False)["amount_numeric"]
+            .sum()
+        )
+        if metric_df.empty:
+            continue
+        for _, row in metric_df.iterrows():
+            period = str(row.get("period", "Current"))
+            trend_rows.append(
+                {
+                    "period": period,
+                    "metric": metric_name,
+                    "amount_numeric": float(row.get("amount_numeric", 0.0)),
+                    "order_key": _period_sort_key(period)[0],
+                }
+            )
+    trend_df = pd.DataFrame(trend_rows)
+    if not trend_df.empty:
+        trend_df = trend_df.sort_values(["order_key", "period", "metric"]).reset_index(drop=True)
+
+    calculations = [
+        {
+            "Metric": "Gross Profit",
+            "Formula": "Revenue - COGS",
+            "Calculation": f"{_format_amount(revenue)} - {_format_amount(cogs)}",
+            "Result": _format_amount(gross_profit),
+            "Interpretation": "Core profitability before operating costs.",
+            "Formula Meaning": "Measures value retained after direct production/service costs.",
+            "Business Need": "Tracks pricing power, unit economics, and cost efficiency.",
+        },
+        {
+            "Metric": "Operating Income",
+            "Formula": "Gross Profit - Expenses",
+            "Calculation": f"{_format_amount(gross_profit)} - {_format_amount(code_totals.get('EXPENSE', 0.0))}",
+            "Result": _format_amount(operating_income),
+            "Interpretation": "Income from operations before financing/tax.",
+            "Formula Meaning": "Profit from core operations excluding financing and tax effects.",
+            "Business Need": "Assesses operational execution quality and controllable profitability.",
+        },
+        {
+            "Metric": "Net Margin",
+            "Formula": "Net Income / Revenue",
+            "Calculation": f"{_format_amount(net_income)} / {_format_amount(revenue)}",
+            "Result": _format_percent(ratios["net_margin"]),
+            "Interpretation": "Overall profitability per dollar of revenue.",
+            "Formula Meaning": "Share of revenue converted into bottom-line earnings.",
+            "Business Need": "Benchmark profitability resilience and strategic efficiency.",
+        },
+        {
+            "Metric": "Debt to Equity",
+            "Formula": "Liabilities / Equity",
+            "Calculation": f"{_format_amount(liabilities)} / {_format_amount(equity)}",
+            "Result": f"{ratios['debt_to_equity']:.2f}x",
+            "Interpretation": "Leverage ratio. Higher values indicate higher financial risk.",
+            "Formula Meaning": "Compares obligations funded by creditors versus owners.",
+            "Business Need": "Supports solvency assessment, covenant monitoring, and capital planning.",
+        },
+        {
+            "Metric": "Asset Turnover",
+            "Formula": "Revenue / Assets",
+            "Calculation": f"{_format_amount(revenue)} / {_format_amount(assets)}",
+            "Result": f"{ratios['asset_turnover']:.2f}x",
+            "Interpretation": "How efficiently assets generate revenue.",
+            "Formula Meaning": "Revenue productivity of the asset base.",
+            "Business Need": "Guides utilization improvements and investment prioritization.",
+        },
+        {
+            "Metric": "Cash Conversion",
+            "Formula": "Cash Flow / Net Income",
+            "Calculation": f"{_format_amount(cash_flow)} / {_format_amount(net_income)}",
+            "Result": f"{ratios['cashflow_to_income']:.2f}x",
+            "Interpretation": "Cash realization quality of accounting earnings.",
+            "Formula Meaning": "Compares accounting earnings with realized cash generation.",
+            "Business Need": "Detects earnings quality risk and working-capital pressure.",
+        },
+    ]
+
+    return {
+        "line_items": int(len(df)),
+        "code_totals": code_totals,
+        "primary": {
+            "revenue": revenue,
+            "gross_profit": gross_profit,
+            "operating_income": operating_income,
+            "net_income": net_income,
+            "assets": assets,
+            "liabilities": liabilities,
+            "equity": equity,
+            "cash_flow": cash_flow,
+        },
+        "ratios": ratios,
+        "trend": trend_df,
+        "calculation_rows": calculations,
+    }
+
+
+def _fallback_finance_recommendation(file_name: str, kpi_pack: Dict[str, Any]) -> str:
+    primary = kpi_pack.get("primary", {})
+    ratios = kpi_pack.get("ratios", {})
+    revenue = float(primary.get("revenue", 0.0))
+    net_income = float(primary.get("net_income", 0.0))
+    net_margin = float(ratios.get("net_margin", 0.0))
+    leverage = float(ratios.get("debt_to_equity", 0.0))
+    cash_conv = float(ratios.get("cashflow_to_income", 0.0))
+
+    recommendations: List[str] = []
+    if revenue <= 0:
+        recommendations.append("Validate revenue mapping and ensure statement extraction captured top-line values.")
+    if net_margin < 0:
+        recommendations.append("Stabilize margin with expense controls and pricing mix optimization.")
+    elif net_margin < 0.08:
+        recommendations.append("Target margin lift through operating efficiency and SKU/channel rationalization.")
+    else:
+        recommendations.append("Maintain profitability discipline while investing in scalable growth segments.")
+
+    if leverage > 2.0:
+        recommendations.append("Review debt structure and refinancing plan to reduce leverage risk.")
+    else:
+        recommendations.append("Current leverage appears manageable; monitor covenant headroom quarterly.")
+
+    if cash_conv < 0.8:
+        recommendations.append("Improve cash conversion through working capital cycle improvements.")
+    else:
+        recommendations.append("Cash conversion is healthy; preserve collection rigor and inventory control.")
+
+    return (
+        f"Financial performance brief for {file_name}\n"
+        f"- Revenue: {_format_amount(revenue)}\n"
+        f"- Net income: {_format_amount(net_income)}\n"
+        f"- Net margin: {_format_percent(net_margin)}\n"
+        f"- Debt to equity: {leverage:.2f}x\n"
+        f"- Cash conversion: {cash_conv:.2f}x\n\n"
+        "Recommendations:\n- " + "\n- ".join(recommendations)
+    )
+
+
+def _extract_pptx_text(path: Path, max_chars: int = 8000) -> str:
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            slide_names = sorted(
+                name for name in archive.namelist() if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+            )
+            text_chunks: List[str] = []
+            for slide_name in slide_names:
+                xml_text = archive.read(slide_name).decode("utf-8", errors="ignore")
+                fragments = re.findall(r"<a:t>(.*?)</a:t>", xml_text)
+                if fragments:
+                    text_chunks.append(" ".join(html.unescape(item) for item in fragments))
+            return "\n".join(text_chunks)[:max_chars]
+    except Exception:
+        return ""
+
+
+def _extract_ppt_binary_strings(path: Path, max_chars: int = 8000) -> str:
+    try:
+        data = path.read_bytes()
+    except Exception:
+        return ""
+
+    matches = re.findall(rb"[A-Za-z][A-Za-z0-9 ,.%:$()\\/-]{6,}", data)
+    text_lines: List[str] = []
+    seen = set()
+    for item in matches:
+        try:
+            decoded = item.decode("latin-1", errors="ignore").strip()
+        except Exception:
+            continue
+        normalized = re.sub(r"\s+", " ", decoded)
+        if len(normalized) < 8:
+            continue
+        lower = normalized.lower()
+        if lower in seen:
+            continue
+        seen.add(lower)
+        text_lines.append(normalized)
+        if len(" ".join(text_lines)) >= max_chars:
+            break
+    return "\n".join(text_lines)[:max_chars]
+
+
+@st.cache_data(show_spinner=False)
+def _load_finance_reference_material() -> Dict[str, Any]:
+    references: List[Dict[str, Any]] = []
+    combined_context_parts: List[str] = []
+    excel_formula_cells: List[str] = []
+
+    for path in REFERENCE_FINANCE_FILES:
+        if not path.exists():
+            references.append({"file_name": str(path), "status": "missing", "highlights": []})
+            continue
+
+        suffix = path.suffix.lower()
+        if suffix == ".xlsx":
+            try:
+                xls = pd.ExcelFile(path)
+                sheet_notes: List[str] = []
+                for sheet_name in xls.sheet_names[:4]:
+                    df = pd.read_excel(path, sheet_name=sheet_name)
+                    numeric_df = df.select_dtypes(include="number")
+                    numeric_summary = {}
+                    if not numeric_df.empty:
+                        for col in numeric_df.columns[:4]:
+                            series = pd.to_numeric(numeric_df[col], errors="coerce").dropna()
+                            if not series.empty:
+                                numeric_summary[str(col)] = float(series.iloc[-1])
+                    if numeric_summary:
+                        summary_text = ", ".join(f"{k}: {_format_amount(v)}" for k, v in numeric_summary.items())
+                        sheet_notes.append(f"{sheet_name} -> {summary_text}")
+                    else:
+                        sheet_notes.append(f"{sheet_name} -> non-numeric model sheet")
+                references.append(
+                    {
+                        "file_name": path.name,
+                        "status": "loaded",
+                        "highlights": sheet_notes[:8],
+                    }
+                )
+                combined_context_parts.append(f"{path.name}: " + " | ".join(sheet_notes))
+                workbook_formulas = _extract_excel_formula_cells(path, max_items=18)
+                excel_formula_cells.extend(workbook_formulas)
+                if workbook_formulas:
+                    combined_context_parts.append(f"{path.name} formulas: " + " | ".join(workbook_formulas[:6]))
+            except Exception as exc:
+                references.append(
+                    {
+                        "file_name": path.name,
+                        "status": "error",
+                        "highlights": [f"Could not parse workbook: {str(exc)}"],
+                    }
+                )
+        elif suffix == ".pdf":
+            text = _extract_pdf_text(path)
+            highlights = [line.strip() for line in text.splitlines() if line.strip()][:10]
+            references.append(
+                {
+                    "file_name": path.name,
+                    "status": "loaded" if highlights else "limited",
+                    "highlights": highlights or ["No text extracted from PDF reference."],
+                }
+            )
+            if highlights:
+                combined_context_parts.append(f"{path.name}: " + " | ".join(highlights[:6]))
+        elif suffix == ".pptx":
+            text = _extract_pptx_text(path)
+            highlights = [line.strip() for line in text.splitlines() if line.strip()][:8]
+            references.append(
+                {
+                    "file_name": path.name,
+                    "status": "loaded" if highlights else "limited",
+                    "highlights": highlights or ["No slide text extracted from pptx archive."],
+                }
+            )
+            if highlights:
+                combined_context_parts.append(f"{path.name}: " + " | ".join(highlights[:5]))
+        elif suffix == ".ppt":
+            text = _extract_ppt_binary_strings(path)
+            highlights = [line.strip() for line in text.splitlines() if line.strip()][:8]
+            references.append(
+                {
+                    "file_name": path.name,
+                    "status": "loaded" if highlights else "limited",
+                    "highlights": highlights or ["Binary .ppt parsing is limited; key strings were not detected."],
+                }
+            )
+            if highlights:
+                combined_context_parts.append(f"{path.name}: " + " | ".join(highlights[:5]))
+
+    context_text = "\n".join(combined_context_parts)[:18000]
+    formula_knowledge = _build_formula_knowledge(context_text, excel_formula_cells)
+
+    return {
+        "references": references,
+        "context_text": context_text,
+        "formula_knowledge": formula_knowledge,
+        "formula_context_text": _formula_knowledge_text(formula_knowledge, max_items=24),
+        "excel_formula_cells": excel_formula_cells[:24],
+    }
+
+
+def _generate_ai_finance_brief(
+    file_name: str,
+    statement_df: pd.DataFrame,
+    kpi_pack: Dict[str, Any],
+    reference_context: str,
+    formula_context: str,
+    template_choice: str,
+    llm_runtime_settings: Dict[str, Any],
+) -> str:
+    line_sample = statement_df[["line_item", "value", "period", "rfs_code"]].head(16).to_dict("records")
+    prompt = (
+        f"Prepare a report-ready financial analysis for {file_name}.\n"
+        f"Template context: {template_choice} ({_template_ai_hint(template_choice)}).\n"
+        "Use concise professional language and include:\n"
+        "1) Executive assessment\n"
+        "2) Detailed ratio interpretation\n"
+        "3) Risks and opportunities\n"
+        "4) Actionable recommendations (short, prioritized)\n\n"
+        f"Primary KPIs: {json.dumps(kpi_pack.get('primary', {}), default=str)}\n"
+        f"Ratios: {json.dumps(kpi_pack.get('ratios', {}), default=str)}\n"
+        f"Sample statement lines: {json.dumps(line_sample, default=str)}\n"
+        f"Reference materials summary: {reference_context[:5000]}\n\n"
+        "Formula knowledge (meaning + why needed):\n"
+        f"{formula_context[:4500]}\n\n"
+        "When presenting analysis, explicitly explain formula meaning and business need before recommendations.\n"
+        "Return markdown only."
+    )
+    system_prompt = (
+        "You are a senior corporate finance advisor. "
+        "Perform clear calculations, state assumptions, and provide decision-ready recommendations."
+    )
+    try:
+        llm.apply_runtime_settings(llm_runtime_settings)
+        return llm.generate(
+            prompt,
+            system_prompt=system_prompt,
+            temperature=0.15,
+            task_type="insight_extraction",
+        )
+    except Exception:
+        return _fallback_finance_recommendation(file_name, kpi_pack)
 
 
 def _build_manual_routing_payload(
@@ -1204,6 +1789,7 @@ def _render_section_editor(
     format_key = f"section_format_{section_id}"
 
     metrics = _compute_metrics(parsed_docs)
+    reference_formula_context = _load_finance_reference_material().get("formula_context_text", "")
     st.markdown(
         f"""
 <div class="preview-card">
@@ -1406,6 +1992,7 @@ def _render_section_editor(
                 st.warning("Add content in Topic Content before running AI assist.")
             else:
                 prompt = (
+                    f"Finance formula knowledge context:\n{reference_formula_context[:2800]}\n\n"
                     f"Template: {template_choice}\n"
                     f"Template guidance: {_template_ai_hint(template_choice)}\n"
                     f"Section title: {section.get('title', 'Topic')}\n"
@@ -1595,6 +2182,249 @@ def _render_rfs_table(parsed_docs: List[Dict[str, Any]]) -> None:
     st.dataframe(compliance_df, use_container_width=True, hide_index=True)
 
 
+def _render_statement_reports_tab(
+    parsed_docs: List[Dict[str, Any]],
+    template_choice: str,
+    llm_runtime_settings: Dict[str, Any],
+) -> None:
+    st.markdown("### Statement-by-Statement Financial Analysis")
+    st.caption(
+        "Each uploaded statement has its own tab with detailed calculations, KPI interpretation, and AI recommendations."
+    )
+    if not parsed_docs:
+        st.info("Upload one or more statements and click `Sign Up & Generate` to create per-statement reports.")
+        return
+
+    statement_df = _statement_rows(parsed_docs, include_sample=False)
+    reference_bundle = _load_finance_reference_material()
+    reference_context = reference_bundle.get("context_text", "")
+    formula_context_text = reference_bundle.get("formula_context_text", "")
+    formula_knowledge = reference_bundle.get("formula_knowledge", [])
+
+    tab_labels = [f"{index + 1}. {doc.get('file_name', 'statement')}" for index, doc in enumerate(parsed_docs)]
+    statement_tabs = st.tabs(tab_labels)
+
+    for index, (doc, statement_tab) in enumerate(zip(parsed_docs, statement_tabs)):
+        with statement_tab:
+            file_name = doc.get("file_name", f"statement_{index + 1}")
+            st.markdown(f"#### {file_name}")
+            info_col_1, info_col_2, info_col_3, info_col_4 = st.columns(4)
+            with info_col_1:
+                st.metric("Format", str(doc.get("format", "")).upper() or "N/A")
+            with info_col_2:
+                st.metric("RFS Status", str(doc.get("rfs_statement", {}).get("status", "n/a")).upper())
+            with info_col_3:
+                st.metric("Extraction Confidence", f"{float(doc.get('extraction_confidence', 0.0)) * 100:.1f}%")
+            with info_col_4:
+                st.metric("Line Items", int(doc.get("rfs_statement", {}).get("summary", {}).get("line_items_detected", 0)))
+
+            doc_rows = statement_df[statement_df["doc_index"] == index].copy()
+            if doc_rows.empty:
+                st.warning("No structured statement lines were detected for this file.")
+                continue
+
+            kpi_pack = _compute_financial_kpis(doc_rows)
+            primary = kpi_pack.get("primary", {})
+            ratios = kpi_pack.get("ratios", {})
+
+            kpi_col_1, kpi_col_2, kpi_col_3, kpi_col_4 = st.columns(4)
+            with kpi_col_1:
+                st.metric("Revenue", _format_amount(float(primary.get("revenue", 0.0))))
+            with kpi_col_2:
+                st.metric("Net Income", _format_amount(float(primary.get("net_income", 0.0))))
+            with kpi_col_3:
+                st.metric("Net Margin", _format_percent(float(ratios.get("net_margin", 0.0))))
+            with kpi_col_4:
+                st.metric("Debt/Equity", f"{float(ratios.get('debt_to_equity', 0.0)):.2f}x")
+
+            st.markdown("##### Detailed Calculations")
+            calc_df = pd.DataFrame(kpi_pack.get("calculation_rows", []))
+            st.dataframe(calc_df, use_container_width=True, hide_index=True)
+            if formula_knowledge:
+                st.markdown("##### Applied Formula Context")
+                applied_formula_df = pd.DataFrame(formula_knowledge[:10])
+                st.dataframe(
+                    applied_formula_df.reindex(columns=["formula", "expression", "meaning", "need", "source"], fill_value=""),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            trend_df = kpi_pack.get("trend", pd.DataFrame())
+            if not trend_df.empty:
+                trend_chart = px.line(
+                    trend_df,
+                    x="period",
+                    y="amount_numeric",
+                    color="metric",
+                    markers=True,
+                    title="Revenue / Net Income / Cash Flow Trend",
+                    color_discrete_sequence=["#4E8DA3", "#D95D47", "#70A15B"],
+                )
+                trend_chart.update_layout(
+                    xaxis_title="Period",
+                    yaxis_title="Amount",
+                    plot_bgcolor="#f7fafc",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    height=320,
+                )
+                st.plotly_chart(trend_chart, use_container_width=True)
+
+            st.markdown("##### Extracted Statement Lines")
+            line_view = doc_rows.reindex(
+                columns=["line_item", "value", "period", "rfs_code", "source", "confidence"],
+                fill_value="",
+            ).copy()
+            line_view["rfs_code"] = line_view["rfs_code"].map(lambda code: f"{code} ({RFS_CODE_LABELS.get(code, 'Other')})")
+            st.dataframe(line_view, use_container_width=True, hide_index=True)
+
+            ai_key = f"statement_ai_brief_{index}"
+            if st.button(
+                "Generate AI Company-Performance Recommendation",
+                key=f"run_statement_ai_{index}",
+                type="primary",
+                use_container_width=True,
+            ):
+                ai_report = _generate_ai_finance_brief(
+                    file_name=file_name,
+                    statement_df=doc_rows,
+                    kpi_pack=kpi_pack,
+                    reference_context=reference_context,
+                    formula_context=formula_context_text,
+                    template_choice=template_choice,
+                    llm_runtime_settings=llm_runtime_settings,
+                )
+                st.session_state[ai_key] = ai_report
+
+            if ai_key in st.session_state:
+                st.markdown("##### AI Report-Ready Recommendation")
+                st.markdown(st.session_state[ai_key])
+
+
+def _render_finance_reference_tab(
+    parsed_docs: List[Dict[str, Any]],
+    template_choice: str,
+    llm_runtime_settings: Dict[str, Any],
+) -> None:
+    st.markdown("### Company Financial Perspective (Reference Framework)")
+    st.caption(
+        "Uses FFMDubai2011.xlsx and ffmslides TVOM references to frame valuation and finance recommendations."
+    )
+
+    reference_bundle = _load_finance_reference_material()
+    references = reference_bundle.get("references", [])
+    reference_context = reference_bundle.get("context_text", "")
+    formula_knowledge = reference_bundle.get("formula_knowledge", [])
+    formula_context_text = reference_bundle.get("formula_context_text", "")
+
+    if references:
+        ref_rows = []
+        for reference in references:
+            ref_rows.append(
+                {
+                    "Reference File": reference.get("file_name", ""),
+                    "Status": reference.get("status", ""),
+                    "Highlights": " | ".join(reference.get("highlights", [])[:3]),
+                }
+            )
+        st.dataframe(pd.DataFrame(ref_rows), use_container_width=True, hide_index=True)
+    if formula_knowledge:
+        st.markdown("#### Formula Knowledge Base (Meaning + Need)")
+        formula_df = pd.DataFrame(formula_knowledge)
+        st.dataframe(
+            formula_df.reindex(columns=["formula", "expression", "meaning", "need", "source"], fill_value=""),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    statement_df = _statement_rows(parsed_docs, include_sample=False)
+    if statement_df.empty:
+        st.info("Generate statement extraction first to produce company-level financial perspective.")
+        return
+
+    overall_kpi = _compute_financial_kpis(statement_df)
+    primary = overall_kpi.get("primary", {})
+    ratios = overall_kpi.get("ratios", {})
+
+    metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
+    with metric_col_1:
+        st.metric("Total Revenue", _format_amount(float(primary.get("revenue", 0.0))))
+    with metric_col_2:
+        st.metric("Total Net Income", _format_amount(float(primary.get("net_income", 0.0))))
+    with metric_col_3:
+        st.metric("Operating Margin", _format_percent(float(ratios.get("operating_margin", 0.0))))
+    with metric_col_4:
+        st.metric("Liabilities/Assets", _format_percent(float(ratios.get("liabilities_to_assets", 0.0))))
+
+    st.markdown("#### Company-Level Calculation Sheet")
+    st.dataframe(pd.DataFrame(overall_kpi.get("calculation_rows", [])), use_container_width=True, hide_index=True)
+
+    code_totals = overall_kpi.get("code_totals", {})
+    code_df = pd.DataFrame(
+        [
+            {"RFS Code": code, "Category": RFS_CODE_LABELS.get(code, "Other"), "Amount": float(value)}
+            for code, value in code_totals.items()
+            if abs(float(value)) > 0.0
+        ]
+    )
+    if not code_df.empty:
+        code_chart = px.bar(
+            code_df.sort_values("Amount", ascending=False),
+            x="Category",
+            y="Amount",
+            title="Company Financial Composition by RFS Category",
+            color_discrete_sequence=["#2D546A"],
+        )
+        code_chart.update_layout(
+            xaxis_title="",
+            yaxis_title="Amount",
+            plot_bgcolor="#f7fafc",
+            paper_bgcolor="rgba(0,0,0,0)",
+            height=320,
+        )
+        st.plotly_chart(code_chart, use_container_width=True)
+
+    trend_df = overall_kpi.get("trend", pd.DataFrame())
+    if not trend_df.empty:
+        group_trend_chart = px.area(
+            trend_df,
+            x="period",
+            y="amount_numeric",
+            color="metric",
+            title="Overall Financial Trend",
+            color_discrete_sequence=["#4E8DA3", "#D95D47", "#70A15B"],
+        )
+        group_trend_chart.update_layout(
+            xaxis_title="Period",
+            yaxis_title="Amount",
+            plot_bgcolor="#f7fafc",
+            paper_bgcolor="rgba(0,0,0,0)",
+            height=320,
+        )
+        st.plotly_chart(group_trend_chart, use_container_width=True)
+
+    company_ai_key = "company_finance_recommendation"
+    if st.button(
+        "Generate Company Finance Recommendation (AI)",
+        key="run_company_finance_ai",
+        type="primary",
+        use_container_width=True,
+    ):
+        company_report = _generate_ai_finance_brief(
+            file_name="Combined Company Portfolio",
+            statement_df=statement_df,
+            kpi_pack=overall_kpi,
+            reference_context=reference_context,
+            formula_context=formula_context_text,
+            template_choice=template_choice,
+            llm_runtime_settings=llm_runtime_settings,
+        )
+        st.session_state[company_ai_key] = company_report
+
+    if company_ai_key in st.session_state:
+        st.markdown("#### AI Finance Perspective")
+        st.markdown(st.session_state[company_ai_key])
+
+
 def _initialize_state() -> None:
     st.session_state.setdefault("reader_outline", [*DEFAULT_OUTLINE])
     if "reader_sections" not in st.session_state:
@@ -1606,6 +2436,7 @@ def _initialize_state() -> None:
     st.session_state.setdefault("template_choice", "Report")
     st.session_state.setdefault("manual_text", "")
     st.session_state.setdefault("topic_text", "")
+    st.session_state.setdefault("include_local_accounting_sample", False)
     st.session_state.setdefault("route_summary_backend", LLMBackend.OLLAMA.value)
     st.session_state.setdefault("route_summary_model", DEFAULT_MODEL_BY_BACKEND[LLMBackend.OLLAMA.value])
     st.session_state.setdefault("route_insight_backend", LLMBackend.OLLAMA.value)
@@ -1857,6 +2688,8 @@ input_mode = _segmented(
 uploaded_files = []
 topic_text = ""
 manual_text = ""
+local_accounting_path = Path("accounting analyzing.pdf")
+include_local_accounting_sample = False
 
 if input_mode == "Type Your Topic":
     topic_text = st.text_input(
@@ -1880,6 +2713,13 @@ else:
         help="Supports CSV, TXT, PDF, DOCX, XLSX, and common image formats.",
     )
 
+if local_accounting_path.exists():
+    include_local_accounting_sample = st.checkbox(
+        "Include local file `accounting analyzing.pdf` in this run",
+        value=st.session_state.get("include_local_accounting_sample", False),
+        key="include_local_accounting_sample",
+    )
+
 action_col_1, action_col_2, action_col_3 = st.columns([1.4, 1.2, 4])
 with action_col_1:
     run_reader = st.button("Sign Up & Generate", type="primary", use_container_width=True)
@@ -1897,6 +2737,9 @@ if reset_reader:
     st.session_state.reader_selected_section = 0
     st.session_state.reader_title = "Marketing Analysis Overview"
     st.session_state.reader_subtitle = _template_subtitle(st.session_state.template_choice)
+    for key in list(st.session_state.keys()):
+        if key.startswith("statement_ai_brief_") or key == "company_finance_recommendation":
+            st.session_state.pop(key, None)
     MEMORY.clear()
 
 if run_reader:
@@ -1906,6 +2749,10 @@ if run_reader:
     for file in uploaded_files or []:
         saved_path = _save_uploaded_file(file)
         parsed = parser.parse(str(saved_path), enable_ocr=enable_ocr, ocr_language=ocr_language)
+        parsed_docs.append(parsed)
+
+    if include_local_accounting_sample and local_accounting_path.exists():
+        parsed = parser.parse(str(local_accounting_path), enable_ocr=enable_ocr, ocr_language=ocr_language)
         parsed_docs.append(parsed)
 
     if manual_text.strip():
@@ -1919,6 +2766,13 @@ if run_reader:
     if not parsed_docs:
         st.error("Provide a topic, text, or upload at least one file before generating.")
     else:
+        reference_bundle = _load_finance_reference_material()
+        finance_knowledge_context = (
+            (reference_bundle.get("context_text", "") + "\n\n" + reference_bundle.get("formula_context_text", ""))
+        )[:12000]
+        for key in list(st.session_state.keys()):
+            if key.startswith("statement_ai_brief_") or key == "company_finance_recommendation":
+                st.session_state.pop(key, None)
         previous_sections = st.session_state.get("reader_sections", [])
         st.session_state.reader_docs = parsed_docs
         st.session_state.reader_outline = _derive_outline(
@@ -1986,6 +2840,8 @@ if run_reader:
                         "ocr_language": ocr_language,
                         "llm_backend": llm_backend,
                         "llm_model": llm_model,
+                        "finance_knowledge_context": finance_knowledge_context,
+                        "formula_knowledge": reference_bundle.get("formula_knowledge", []),
                         "llm_settings": {
                             "backend": llm_backend,
                             "model_name": llm_model,
@@ -2024,7 +2880,15 @@ llm_runtime_settings = {
     "routing": effective_routing,
 }
 
-workspace_tab, inspector_tab, advanced_tab = st.tabs(["Reader Workspace", "Extraction Inspector", "Advanced"])
+workspace_tab, statement_reports_tab, finance_tab, inspector_tab, advanced_tab = st.tabs(
+    [
+        "Reader Workspace",
+        "Statement Reports",
+        "Finance Perspective",
+        "Extraction Inspector",
+        "Advanced",
+    ]
+)
 
 with workspace_tab:
     left_col, right_col = st.columns([1.05, 1.65], gap="large")
@@ -2038,12 +2902,26 @@ with workspace_tab:
             llm_runtime_settings=llm_runtime_settings,
         )
 
+with statement_reports_tab:
+    _render_statement_reports_tab(
+        st.session_state.reader_docs,
+        template_choice=st.session_state.template_choice,
+        llm_runtime_settings=llm_runtime_settings,
+    )
+
+with finance_tab:
+    _render_finance_reference_tab(
+        st.session_state.reader_docs,
+        template_choice=st.session_state.template_choice,
+        llm_runtime_settings=llm_runtime_settings,
+    )
+
 with inspector_tab:
     st.markdown("### RFS Statement Compliance")
     _render_rfs_table(st.session_state.reader_docs)
 
     statement_df = _statement_rows(st.session_state.reader_docs)
-    statement_view_columns = ["file_name", "line_item", "value", "period", "source", "confidence"]
+    statement_view_columns = ["file_name", "line_item", "value", "period", "rfs_code", "source", "confidence"]
     statement_df = statement_df.reindex(columns=statement_df.columns.union(statement_view_columns), fill_value="")
     st.markdown("### Extracted Statement Lines")
     st.dataframe(

@@ -22,6 +22,7 @@ class AIAgent(BaseAgent):
             content = task.get("content", "")
             analysis_type = task.get("analysis_type", "summarization")
             llm_task_overrides = task.get("llm_task_overrides", {}) or {}
+            finance_knowledge_context = self._build_finance_knowledge_context(task)
 
             if not content:
                 raise ValueError("No content provided for analysis")
@@ -31,12 +32,14 @@ class AIAgent(BaseAgent):
             # Generate summary
             summary = self._generate_summary(
                 content,
+                finance_knowledge_context=finance_knowledge_context,
                 route_override=llm_task_overrides.get("summarization"),
             )
 
             # Extract key insights
             insights = self._extract_insights(
                 content,
+                finance_knowledge_context=finance_knowledge_context,
                 route_override=llm_task_overrides.get("insight_extraction"),
             )
 
@@ -44,6 +47,7 @@ class AIAgent(BaseAgent):
             outline = self._generate_outline(
                 summary,
                 insights,
+                finance_knowledge_context=finance_knowledge_context,
                 route_override=llm_task_overrides.get("outline_generation"),
             )
 
@@ -83,6 +87,7 @@ class AIAgent(BaseAgent):
         self,
         content: str,
         max_length: int = 500,
+        finance_knowledge_context: str = "",
         route_override: Dict[str, Any] = None,
     ) -> str:
         """Generate concise summary using LLM."""
@@ -93,6 +98,11 @@ Content:
 {content[:2000]}
 
 Summary:"""
+        if finance_knowledge_context:
+            prompt += (
+                "\n\nReference finance formula knowledge (use only if relevant):\n"
+                + finance_knowledge_context[:3500]
+            )
 
         try:
             summary = llm.generate(
@@ -106,7 +116,12 @@ Summary:"""
             self.log_error(f"Summary generation failed: {str(e)}")
             return self._fallback_summary(content, max_length=max_length)
 
-    def _extract_insights(self, content: str, route_override: Dict[str, Any] = None) -> List[str]:
+    def _extract_insights(
+        self,
+        content: str,
+        finance_knowledge_context: str = "",
+        route_override: Dict[str, Any] = None,
+    ) -> List[str]:
         """Extract key insights from content."""
         prompt = f"""Extract 3-5 key financial insights from the following content.
 Return as a JSON array of strings.
@@ -115,6 +130,12 @@ Content:
 {content[:2000]}
 
 Insights (JSON array):"""
+        if finance_knowledge_context:
+            prompt += (
+                "\n\nReference formula knowledge (meaning + use-case):\n"
+                + finance_knowledge_context[:3500]
+                + "\nUse relevant formulas when deriving insights."
+            )
 
         try:
             response = llm.generate(
@@ -135,6 +156,7 @@ Insights (JSON array):"""
         self,
         summary: str,
         insights: List[str],
+        finance_knowledge_context: str = "",
         route_override: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """Generate report outline."""
@@ -147,6 +169,11 @@ Summary:
 Insights:
 {json.dumps(insights)}
 """
+        if finance_knowledge_context:
+            prompt += (
+                "\nReference formula/valuation context:\n"
+                + finance_knowledge_context[:2200]
+            )
 
         try:
             response = llm.generate(
@@ -169,6 +196,24 @@ Insights:
             "Recommendations": [],
             "Appendix": [],
         }
+
+    def _build_finance_knowledge_context(self, task: Dict[str, Any]) -> str:
+        """Build compact reference context from task payload."""
+        explicit = str(task.get("finance_knowledge_context", "") or "").strip()
+        formula_entries = task.get("formula_knowledge", [])
+
+        formula_lines: List[str] = []
+        if isinstance(formula_entries, list):
+            for entry in formula_entries[:18]:
+                if not isinstance(entry, dict):
+                    continue
+                formula_lines.append(
+                    f"{entry.get('formula', '')}: {entry.get('expression', '')} | "
+                    f"Meaning: {entry.get('meaning', '')} | Need: {entry.get('need', '')}"
+                )
+
+        merged = (explicit + "\n" + "\n".join(formula_lines)).strip()
+        return merged[:7000]
 
     def _extract_keywords(self, content: str, insights: List[str]) -> List[str]:
         """Extract keywords for tagging."""
