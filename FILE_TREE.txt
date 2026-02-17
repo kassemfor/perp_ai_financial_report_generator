@@ -1,0 +1,46 @@
+ai_financial_report_generator/
+├── config
+├── logs
+├── outputs
+├── src
+│   ├── agents
+│   │   ├── __init__.py
+│   │   ├── ai_agent.py
+│   │   ├── backend_agent.py
+│   │   ├── base_agent.py
+│   │   ├── coordinator_agent.py
+│   │   ├── debugging_agent.py
+│   │   ├── environment_setup_agent.py
+│   │   ├── planner_agent.py
+│   │   ├── testing_agent.py
+│   │   └── visualization_agent.py
+│   ├── backend
+│   │   ├── __init__.py
+│   │   └── file_parser.py
+│   ├── core
+│   │   ├── __init__.py
+│   │   ├── llm_interface.py
+│   │   └── state.py
+│   ├── frontend
+│   │   ├── __init__.py
+│   │   └── streamlit_app.py
+│   ├── utils
+│   │   └── __init__.py
+│   ├── __init__.py
+│   └── config.py
+├── templates
+├── tests
+│   ├── __init__.py
+│   └── test_suite.py
+├── uploads
+├── ARCHITECTURE.md
+├── Dockerfile
+├── MANIFEST.json
+├── PROJECT_SUMMARY.json
+├── QUICKSTART.md
+├── README.md
+├── docker-compose.yml
+├── main.py
+├── requirements.txt
+├── setup.ps1
+└── setup.sh

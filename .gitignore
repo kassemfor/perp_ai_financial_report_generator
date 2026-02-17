@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Environment / secrets
+.env
+.env.*
+!.env.template
+*.pem
+*.key
+*.p12
+*.crt
+
+# Runtime and generated artifacts
+logs/
+outputs/
+uploads/
+tmp/
+*.log
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
