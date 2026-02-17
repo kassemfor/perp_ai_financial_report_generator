@@ -309,4 +309,4 @@ For issues, questions, or feature requests, open an issue on GitHub.
 
 ---
 
-**Built with ❤️ | v1.0 | AI-Powered Financial Intelligence**
+**Built with ❤️ | v1.0 | Kris**
